@@ -18,12 +18,17 @@ data World = World
   , worldMode   :: Mode
   , worldGrab   :: Float
   , worldRadius :: Float
+  , worldInner  :: [ScaleSpec]
+  , worldOuter  :: [ScaleSpec]
   }
 
 data Mode = MoveCursor | MoveWheel | MoveNone
 
 initialWorld :: World
-initialWorld = World 0 0 MoveNone 0 400
+initialWorld = World 0 0 MoveNone 0 400 defaultInnerScales defaultOuterScales
+
+defaultOuterScales = [dScale,aScale,kScale]
+defaultInnerScales = [cScale,ciScale,bScale,lScale]
 
 scaleWidth  = 40
 cursorLo    = -160
@@ -36,7 +41,7 @@ main = play
   black
   1
   initialWorld
-  (draw defaultInnerScales defaultOuterScales)
+  draw
   handleEvent
   (\_ w -> w)
 
@@ -46,21 +51,24 @@ main = play
 
 handleEvent :: Event -> World -> World
 
+-- Detect dragging of cursor or wheel
 handleEvent (EventMotion pt) w =
   case worldMode w of
     MoveCursor -> w { worldCursor = posToTheta pt - worldGrab w }
     MoveWheel  -> w { worldWheel  = posToTheta pt - worldGrab w }
-    _ -> w
+    _          -> w
 
+-- Reset sliderule to initial conditions
 handleEvent (EventKey (Char 'z') Down _ _) _ =
   initialWorld
 
+-- Dynamic resizing of the wheel
 handleEvent (EventKey (Char '=') Down _ _) w =
   w { worldRadius = worldRadius w + 10 }
-
 handleEvent (EventKey (Char '-') Down _ _) w =
   w { worldRadius = worldRadius w - 10 }
 
+-- Detect when cursor or wheel are grabbed
 handleEvent (EventKey (MouseButton LeftButton) Down _ pt) w
 
   | cursorClick =
@@ -76,14 +84,15 @@ handleEvent (EventKey (MouseButton LeftButton) Down _ pt) w
   | otherwise = w
 
   where
+  cursorLo    = worldRadius w - scaleWidth * fromIntegral (length (worldInner w)) + 2
+  cursorHi    = worldRadius w + scaleWidth * fromIntegral (length (worldOuter w)) + 2
   clickRadius = magV pt
-  cursorClick = worldRadius w+cursorLo <= clickRadius
-             && clickRadius <= worldRadius w+cursorHi
+  wheelClick  = clickRadius <= worldRadius w
+  cursorClick = cursorLo <= clickRadius && clickRadius <= cursorHi
              -- extra addition and mod' to deal with boundary case
              && mod' (abs (posToTheta pt - worldCursor w)+10) 360 <= 20
 
-  wheelClick = clickRadius <= worldRadius w
-
+-- Release cursor and wheel
 handleEvent (EventKey (MouseButton LeftButton) Up _ _) w =
   w { worldMode = MoveNone }
 
@@ -97,11 +106,8 @@ posToTheta (x,y) = radToDeg (argV (y,x))
 
 ------------------------------------------------------------------------
 
-
-defaultOuterScales = [dScale,aScale,kScale]
-defaultInnerScales = [cScale,ciScale,bScale,lScale]
-
-draw innerScales outerScales w =
+draw :: World -> Picture
+draw w =
      body
   <> cursorRegion w
   <> outerWheel
@@ -109,28 +115,28 @@ draw innerScales outerScales w =
 
   <> rotate (worldCursor w) cursorHairline
   <> wheelDivider
-  <> drawReadout outerScales innerScales w
+  <> drawReadout w
   where
   outerWheel =
-    fold [ drawScale DrawOut scale (worldRadius w+fromIntegral(scaleWidth*i))
-         | (i,scale) <- zip [0..] outerScales]
+    fold [ drawScale DrawOut scale (worldRadius w+scaleWidth*fromIntegral i)
+         | (i,scale) <- zip [0..] (worldOuter w)]
 
   innerWheel =
-    fold [ drawScale DrawIn scale (worldRadius w-fromIntegral(scaleWidth*i))
-         | (i,scale) <- zip [0..] innerScales]
+    fold [ drawScale DrawIn scale (worldRadius w-scaleWidth*fromIntegral i)
+         | (i,scale) <- zip [0..] (worldInner w)]
 
   body = color white
-       $ circleSolid (worldRadius w + fromIntegral (scaleWidth * length outerScales))
+       $ circleSolid (worldRadius w + scaleWidth * fromIntegral (length (worldOuter w)))
 
   wheelDivider = circle (worldRadius w)
 
   cursorHairline = color red (line [(0,worldRadius w+cursorLo), (0,worldRadius w+cursorHi)])
 
-drawReadout :: [ScaleSpec] -> [ScaleSpec] -> World -> Picture
-drawReadout outss inss w = fold
+drawReadout :: World -> Picture
+drawReadout w = fold
   [ label <> readout
-  | (i,(frac,s)) <- zip [0..] (map ((,) cursorFrac) (reverse outss)
-                            <> map ((,) wheelFrac) inss)
+  | (i,(frac,s)) <- zip [0..] (map ((,) cursorFrac) (reverse (worldOuter w))
+                            <> map ((,) wheelFrac) (worldInner w))
   , let y = 105-30*fromIntegral i
         v = scaleFracToVal s frac
         readout = translate (-20) y
@@ -193,6 +199,10 @@ data ScaleSpec = ScaleSpec
 
 data Importance = High | Medium | Low
 
+------------------------------------------------------------------------
+-- Specification of scales
+------------------------------------------------------------------------
+
 cScale :: ScaleSpec
 cScale = ScaleSpec
   { scaleValToFrac = logBase 10
@@ -210,7 +220,9 @@ ciScale = ScaleSpec
   , scaleFracToVal = \x -> 10**(mod' (1-x) 1)
   , scaleName = "CI"
   , scalePolarity = Backward
-  , scaleTicks = scaleTicks cScale
+  , scaleTicks = gen 1 2  100 5 10
+              <> gen 2 5  50  5 25
+              <> gen 5 10 20  2 10
   }
 
 lScale :: ScaleSpec
@@ -219,35 +231,11 @@ lScale = ScaleSpec
   , scaleFracToVal = id
   , scalePolarity = Forward
   , scaleName = "L"
-  , scaleTicks     = [(y, h x) | x <- [0..199], let y = x % 200]
+  , scaleTicks = gen 0 1 200 2 10
   }
-  where
-  h x | rem x 10 == 0 = High
-      | rem x  2 == 0 = Medium
-      | otherwise     = Low
-
-gen :: Integer -> Integer -> Integer -> Integer -> Integer -> [(Rational, Importance)]
-gen lo hi incLo incMed incHi =
-  [(y, h)
-     | x <- [lo * incLo .. hi * incLo - 1]
-     , let y = x%incLo
-     , let h | rem x incHi  == 0 = High
-             | rem x incMed == 0 = Medium
-             | otherwise         = Low
-     ]
-
-gen' :: Integer -> Integer -> Integer -> Integer -> Integer -> [(Rational, Importance)]
-gen' lo hi incLo incMed incHi =
-  [(y, h)
-     | x <- [lo `div` incLo .. hi `div` incLo - 1]
-     , let y = fromIntegral (x * incLo)
-     , let h | rem x incHi  == 0 = High
-             | rem x incMed == 0 = Medium
-             | otherwise         = Low
-     ]
 
 dScale :: ScaleSpec
-dScale = aScale { scaleName = "D" }
+dScale = cScale { scaleName = "D" }
 
 bScale :: ScaleSpec
 bScale = aScale { scaleName = "B" }
@@ -284,6 +272,7 @@ kScale = ScaleSpec
               <> gen'  500 1000 10 5 10
   }
 
+
 showLabel :: Float -> String
 showLabel l =
   (if null whole then "" else map intToDigit whole)
@@ -298,3 +287,25 @@ showLabel l =
   frac
     | 0 <= n = drop n xs
     | otherwise = replicate (-n) 0 ++ xs
+
+
+gen :: Integer -> Integer -> Integer -> Integer -> Integer -> [(Rational, Importance)]
+gen lo hi incLo incMed incHi =
+  [(y, h)
+     | x <- [lo * incLo .. hi * incLo - 1]
+     , let y = x%incLo
+     , let h | rem x incHi  == 0 = High
+             | rem x incMed == 0 = Medium
+             | otherwise         = Low
+     ]
+
+gen' :: Integer -> Integer -> Integer -> Integer -> Integer -> [(Rational, Importance)]
+gen' lo hi incLo incMed incHi =
+  [(y, h)
+     | x <- [lo `div` incLo .. hi `div` incLo - 1]
+     , let y = fromIntegral (x * incLo)
+     , let h | rem x incHi  == 0 = High
+             | rem x incMed == 0 = Medium
+             | otherwise         = Low
+     ]
+
